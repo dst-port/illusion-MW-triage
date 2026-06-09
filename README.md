@@ -100,3 +100,34 @@ Security and usage notes
 This tool is intended for controlled forensic or triage environments. Memory dumping and attaching to running processes often require elevated privileges; run on isolated hosts with appropriate safeguards. The Linux backend uses `firejail` and procfs-based monitoring; the Windows backend will use platform-appropriate isolation and debugging facilities when implemented.
 
 This README focuses on the tool's behavior, the sub-tools it uses for analysis, platform differences, and the artifacts produced.
+
+**Release artifacts and repository hygiene**
+
+- Keep the repository focused: commit source code and curated release binaries under `/release/`. Do not commit `target/` or other transient build artifacts.
+- The repository history has been rewritten to remove previously committed `target/` build artifacts and other large files. If you have a local clone from before this rewrite, update it with:
+
+```bash
+git fetch origin --all
+git reset --hard origin/main
+```
+
+- To create release binaries locally:
+	- Linux (local build):
+
+```bash
+cargo build --release
+cp target/release/illusion_sandbox release/illusion_sandbox-linux
+```
+
+	- Windows (recommended: build on Windows or use an appropriate cross toolchain):
+
+```bash
+# Option A: build on Windows with MSVC toolchain
+# Option B: cross-compile on Linux with mingw toolchain
+rustup target add x86_64-pc-windows-gnu
+sudo apt-get install mingw-w64   # Debian/Ubuntu
+cargo build --release --target x86_64-pc-windows-gnu
+cp target/x86_64-pc-windows-gnu/release/illusion_sandbox.exe release/illusion_sandbox-windows.exe
+```
+
+- After adding release binaries, commit only the files under `/release/` and avoid adding `target/` into future commits. Use `git lfs` for very large release artifacts when appropriate.
