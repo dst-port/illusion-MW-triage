@@ -1,4 +1,4 @@
-```yara
+
 /*
     Cross-Platform Malware Hunting Ruleset
     Targets:
