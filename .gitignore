@@ -10,3 +10,9 @@
 # Logs
 *.log
 # keep release/ in repo (do not ignore)
+
+# Runtime / test artifacts (should not be published)
+/runs/
+/quarantine/
+/hunt_reports/
+.tmpex* 
