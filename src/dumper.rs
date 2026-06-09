@@ -1,15 +1,15 @@
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::io::{self, Read, Write, Seek, SeekFrom};
-use std::fs::File;
-use std::os::unix::io::AsRawFd;
-use std::io::BufWriter;
-use sha2::{Sha256, Digest};
-use std::fs;
 
 use nix::sys::ptrace;
-use nix::unistd::Pid;
 use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::Pid;
 
 #[derive(Debug)]
 pub struct DumpMetadata {
@@ -18,7 +18,6 @@ pub struct DumpMetadata {
 }
 
 pub fn dump_process(pid: u32, out_dir: &Path) -> io::Result<DumpMetadata> {
-    // On Windows, delegate to platform-specific dumper when compiled there.
     #[cfg(target_os = "windows")]
     {
         match crate::platform::dump_process_platform(pid, out_dir) {
@@ -26,7 +25,6 @@ pub fn dump_process(pid: u32, out_dir: &Path) -> io::Result<DumpMetadata> {
             Err(e) => return Err(e),
         }
     }
-    // try gcore
     let out_base = out_dir.join(format!("core.{}", pid));
     let gcore_out = out_base.with_extension("core");
     if Command::new("gcore")
@@ -37,10 +35,12 @@ pub fn dump_process(pid: u32, out_dir: &Path) -> io::Result<DumpMetadata> {
         .map(|s| s.success())
         .unwrap_or(false)
     {
-        return Ok(DumpMetadata { path: gcore_out, method: "gcore".to_string() });
+        return Ok(DumpMetadata {
+            path: gcore_out,
+            method: "gcore".to_string(),
+        });
     }
 
-    // try gdb
     let gdb_out = out_base.with_extension("core.gdb");
     if Command::new("gdb")
         .arg("--batch")
@@ -52,17 +52,24 @@ pub fn dump_process(pid: u32, out_dir: &Path) -> io::Result<DumpMetadata> {
         .map(|s| s.success())
         .unwrap_or(false)
     {
-        return Ok(DumpMetadata { path: gdb_out, method: "gdb".to_string() });
+        return Ok(DumpMetadata {
+            path: gdb_out,
+            method: "gdb".to_string(),
+        });
     }
 
-    // attempt ptrace-based dump
     match ptrace_dump(pid, &out_base) {
-        Ok(p) => Ok(DumpMetadata { path: p, method: "ptrace".to_string() }),
+        Ok(p) => Ok(DumpMetadata {
+            path: p,
+            method: "ptrace".to_string(),
+        }),
         Err(e) => {
-            // fallback: create a placeholder file to indicate that ptrace path failed
             let ptrace_out = out_base.with_extension("core.ptrace");
             let _f = File::create(&ptrace_out)?;
-            Ok(DumpMetadata { path: ptrace_out, method: format!("ptrace-fallback: {}", e) })
+            Ok(DumpMetadata {
+                path: ptrace_out,
+                method: format!("ptrace-fallback: {}", e),
+            })
         }
     }
 }
@@ -76,12 +83,8 @@ pub struct MemoryDiskComparison {
     pub notes: Vec<String>,
 }
 
-/// Compare the SHA256 of the on-disk executable (if accessible) with the
-/// SHA256 computed from the process's mapped executable regions in memory.
-/// Returns `MemoryDiskComparison` with details and notes about failures.
 pub fn compare_memory_vs_disk(pid: u32) -> io::Result<MemoryDiskComparison> {
     let mut notes: Vec<String> = Vec::new();
-    // resolve /proc/<pid>/exe
     let exe_link = format!("/proc/{}/exe", pid);
     let exe_path = match fs::read_link(&exe_link) {
         Ok(p) => Some(p),
@@ -91,7 +94,6 @@ pub fn compare_memory_vs_disk(pid: u32) -> io::Result<MemoryDiskComparison> {
         }
     };
 
-    // compute on-disk hash if we have a path
     let on_disk_hash = if let Some(ref p) = exe_path {
         match compute_file_sha256(p) {
             Ok(h) => Some(h),
@@ -100,9 +102,10 @@ pub fn compare_memory_vs_disk(pid: u32) -> io::Result<MemoryDiskComparison> {
                 None
             }
         }
-    } else { None };
+    } else {
+        None
+    };
 
-    // compute in-memory hash for regions that appear to belong to the exe
     let in_memory_hash = match compute_memory_sha256_for_exe(pid, exe_path.as_ref()) {
         Ok(h) => h,
         Err(e) => {
@@ -116,7 +119,13 @@ pub fn compare_memory_vs_disk(pid: u32) -> io::Result<MemoryDiskComparison> {
         _ => false,
     };
 
-    Ok(MemoryDiskComparison { exe_path, on_disk_hash, in_memory_hash, mismatch, notes })
+    Ok(MemoryDiskComparison {
+        exe_path,
+        on_disk_hash,
+        in_memory_hash,
+        mismatch,
+        notes,
+    })
 }
 
 fn compute_file_sha256(path: &Path) -> io::Result<String> {
@@ -125,50 +134,53 @@ fn compute_file_sha256(path: &Path) -> io::Result<String> {
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = f.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buf[..n]);
     }
     let digest = hasher.finalize();
     Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
-fn compute_memory_sha256_for_exe(pid: u32, exe_path_opt: Option<&PathBuf>) -> io::Result<Option<String>> {
-    // open maps and mem
+fn compute_memory_sha256_for_exe(
+    pid: u32,
+    exe_path_opt: Option<&PathBuf>,
+) -> io::Result<Option<String>> {
     let maps_path = format!("/proc/{}/maps", pid);
     let maps = fs::read_to_string(&maps_path)?;
     let mem_path = format!("/proc/{}/mem", pid);
     let mut mem_file = File::open(&mem_path)?;
 
-    let exe_basename = exe_path_opt.and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()));
+    let exe_basename =
+        exe_path_opt.and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()));
 
     let mut hasher = Sha256::new();
     let mut found_any = false;
 
     for line in maps.lines() {
-        // tokens: range perms offset dev inode [pathname]
         let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() < 2 { continue; }
+        if tokens.len() < 2 {
+            continue;
+        }
         let range = tokens[0];
         let perms = tokens[1];
-        if !perms.starts_with('r') { continue; }
+        if !perms.starts_with('r') {
+            continue;
+        }
 
         let pathname_opt = tokens.get(5).map(|s| s.to_string());
         let mut pathname_clean: Option<String> = None;
         if let Some(p) = pathname_opt {
-            // strip " (deleted)" suffix which appears in some /proc maps
             let p = p.trim_end_matches(" (deleted)");
             pathname_clean = Some(p.to_string());
         }
 
         let is_exe_region = match (&exe_path_opt, &pathname_clean, &exe_basename) {
             (Some(exe_path), Some(map_p), Some(bn)) => {
-                // exact path match, or basename match
                 let map_path = Path::new(map_p);
-                if map_path == exe_path.as_path() { true }
-                else if map_p.ends_with(bn) { true }
-                else { false }
+                map_path == exe_path.as_path() || map_p.ends_with(bn)
             }
-            // if we don't have an exe_path, fall back to matching basename only
             (None, Some(map_p), Some(bn)) => map_p.ends_with(bn),
             _ => false,
         };
@@ -177,11 +189,12 @@ fn compute_memory_sha256_for_exe(pid: u32, exe_path_opt: Option<&PathBuf>) -> io
             continue;
         }
 
-        // parse range
         let mut se = range.split('-');
         let start = u64::from_str_radix(se.next().unwrap_or("0"), 16).unwrap_or(0);
         let end = u64::from_str_radix(se.next().unwrap_or("0"), 16).unwrap_or(0);
-        if end <= start { continue; }
+        if end <= start {
+            continue;
+        }
 
         let mut remaining = end - start;
         let mut offset = start;
@@ -211,8 +224,7 @@ fn compute_memory_sha256_for_exe(pid: u32, exe_path_opt: Option<&PathBuf>) -> io
 }
 
 fn ptrace_dump(pid: u32, out_base: &Path) -> io::Result<PathBuf> {
-    // conservative limit to avoid blowing disk
-    const MAX_DUMP_BYTES: u64 = 100 * 1024 * 1024; // 100 MiB
+    const MAX_DUMP_BYTES: u64 = 100 * 1024 * 1024;
 
     let out_path = out_base.with_extension("core.ptrace");
     let mut out = BufWriter::new(File::create(&out_path)?);
@@ -220,17 +232,16 @@ fn ptrace_dump(pid: u32, out_base: &Path) -> io::Result<PathBuf> {
     let target = Pid::from_raw(pid as i32);
     let mut attached = false;
 
-    // Try to attach; if we can't, we'll still attempt to read /proc/<pid>/mem
     if ptrace::attach(target).is_ok() {
         attached = true;
-        // Wait for the tracee to stop
         match waitpid(target, None) {
-            Ok(WaitStatus::Stopped(_, _)) | Ok(WaitStatus::PtraceEvent(_, _, _)) | Ok(WaitStatus::PtraceSyscall(_)) => {}
+            Ok(WaitStatus::Stopped(_, _))
+            | Ok(WaitStatus::PtraceEvent(_, _, _))
+            | Ok(WaitStatus::PtraceSyscall(_)) => {}
             _ => {}
         }
     }
 
-    // Read /proc/<pid>/maps to find readable regions
     let maps_path = format!("/proc/{}/maps", pid);
     let maps = std::fs::read_to_string(&maps_path)?;
     let mem_path = format!("/proc/{}/mem", pid);
@@ -242,7 +253,6 @@ fn ptrace_dump(pid: u32, out_base: &Path) -> io::Result<PathBuf> {
         if total_read >= MAX_DUMP_BYTES {
             break;
         }
-        // Format: address perms offset dev inode pathname
         let mut parts = line.split_whitespace();
         let range = match parts.next() {
             Some(r) => r,
@@ -266,10 +276,14 @@ fn ptrace_dump(pid: u32, out_base: &Path) -> io::Result<PathBuf> {
             region_size = MAX_DUMP_BYTES - total_read;
         }
 
-        // write a simple header for this region
-        writeln!(out, "REGION {:#x}-{:#x} {}", start, start + region_size, perms)?;
+        writeln!(
+            out,
+            "REGION {:#x}-{:#x} {}",
+            start,
+            start + region_size,
+            perms
+        )?;
 
-        // read region in chunks using seek+read on /proc/<pid>/mem
         let mut remaining = region_size;
         let mut offset = start;
         let mut buf = vec![0u8; 64 * 1024];
@@ -294,7 +308,6 @@ fn ptrace_dump(pid: u32, out_base: &Path) -> io::Result<PathBuf> {
         out.flush()?;
     }
 
-    // Detach if we attached
     if attached {
         let _ = ptrace::detach(target, None);
     }

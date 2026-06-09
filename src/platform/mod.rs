@@ -5,26 +5,23 @@ pub mod linux;
 pub mod windows;
 
 #[cfg(target_os = "linux")]
+#[allow(unused_imports)]
 pub use linux::*;
 
 #[cfg(target_os = "windows")]
+#[allow(unused_imports)]
 pub use windows::*;
 
-// Allow the re-exports to exist even if unused on some platforms.
-#[allow(unused_imports)]
-
-/// Platform-agnostic dump function signature.
-use std::path::Path;
 use std::io;
+#[allow(unused_imports)]
+use std::path::Path;
 use std::path::PathBuf;
 
 pub fn dump_process_platform(pid: u32, out_dir: &Path) -> io::Result<(PathBuf, String)> {
-    // delegated to platform-specific module
     platform_dump_process(pid, out_dir)
 }
 
-// platform-specific implementations must provide this function.
 #[allow(unused_variables)]
 fn platform_dump_process(pid: u32, out_dir: &Path) -> io::Result<(PathBuf, String)> {
-    Err(io::Error::new(io::ErrorKind::Other, "platform dump not implemented"))
+    Err(io::Error::other("platform dump not implemented"))
 }

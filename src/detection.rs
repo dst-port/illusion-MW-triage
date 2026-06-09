@@ -1,10 +1,10 @@
-use std::path::Path;
 use std::io;
+use std::path::Path;
 
-use crate::packers::{contains_upx_marker, contains_packer_marker, shannon_entropy};
-use crate::impersonation::detect_masquerade;
-use crate::whitelist::Whitelist;
 use crate::hash;
+use crate::impersonation::detect_masquerade;
+use crate::packers::{contains_packer_marker, contains_upx_marker, shannon_entropy};
+use crate::whitelist::Whitelist;
 
 #[derive(Debug, Clone)]
 pub struct DetectionResult {
@@ -13,28 +13,33 @@ pub struct DetectionResult {
     pub sha256: Option<String>,
 }
 
-/// Analyze a path using simple heuristics: whitelist, packer markers, entropy, masquerade.
 pub fn analyze_path(path: &Path, whitelist: Option<&Whitelist>) -> io::Result<DetectionResult> {
     let mut flags = Vec::new();
     let mut suspicious = false;
     let sha = hash::compute_sha256(path).ok();
     if let Some(ref s) = sha {
         if let Some(wl) = whitelist {
-            if wl.is_whitelisted(&path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string(), s) {
+            let fname = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if wl.is_whitelisted(fname, s) {
                 flags.push("whitelisted".to_string());
-                return Ok(DetectionResult { suspicious: false, flags, sha256: Some(s.clone()) });
+                return Ok(DetectionResult {
+                    suspicious: false,
+                    flags,
+                    sha256: Some(s.clone()),
+                });
             }
         }
     }
 
-    // packer marker (broad scan)
     match contains_packer_marker(path) {
         Ok(Some(name)) => {
             flags.push(format!("packer:{}", name.to_lowercase()));
             suspicious = true;
         }
         Ok(None) => {
-            // fallback: check explicit UPX quick-check
             if let Ok(true) = contains_upx_marker(path) {
                 flags.push("packer:upx".to_string());
                 suspicious = true;
@@ -43,7 +48,6 @@ pub fn analyze_path(path: &Path, whitelist: Option<&Whitelist>) -> io::Result<De
         Err(_) => {}
     }
 
-    // entropy
     if let Ok(ent) = shannon_entropy(path) {
         if ent > 7.5 {
             flags.push(format!("high_entropy:{:.2}", ent));
@@ -51,29 +55,34 @@ pub fn analyze_path(path: &Path, whitelist: Option<&Whitelist>) -> io::Result<De
         }
     }
 
-    // masquerade detection against a small common list
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-    if let Some((cand, score)) = detect_masquerade(name, &["bash","sh","sshd","sudo","systemd","python","python3"], 0.9) {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if let Some((cand, score)) = detect_masquerade(
+        name,
+        &["bash", "sh", "sshd", "sudo", "systemd", "python", "python3"],
+        0.9,
+    ) {
         flags.push(format!("masquerade:{}:{:.2}", cand, score));
         suspicious = true;
     }
 
-    // optional YARA scan (feature-gated); returns rule name or None
     if let Ok(Some(rule)) = run_yara_scan(path) {
         flags.push(format!("yara:{}", rule));
         suspicious = true;
     }
 
-    Ok(DetectionResult { suspicious, flags, sha256: sha })
+    Ok(DetectionResult {
+        suspicious,
+        flags,
+        sha256: sha,
+    })
 }
 
-// YARA integration: feature-gated. When the `yara` feature is enabled and
-// `libyara` is available, this will run the rules and return a matching rule
-// identifier. Without the feature this is a no-op returning Ok(None).
 #[cfg(feature = "yara")]
 fn run_yara_scan(path: &Path) -> io::Result<Option<String>> {
     use std::process::Command;
-    // look for common rule filenames in the repo
     let candidates = ["yara_rules.yar", "rules.yar", "yara/rules.yar"];
     for c in candidates.iter() {
         let p = std::path::Path::new(c);
@@ -95,13 +104,15 @@ fn run_yara_scan(path: &Path) -> io::Result<Option<String>> {
 }
 
 #[cfg(not(feature = "yara"))]
-fn run_yara_scan(_path: &Path) -> io::Result<Option<String>> { Ok(None) }
+fn run_yara_scan(_path: &Path) -> io::Result<Option<String>> {
+    Ok(None)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_detection_whitelist() {
@@ -111,8 +122,7 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(b"dummy").unwrap();
         let res = analyze_path(f.path(), Some(&wl)).unwrap();
-        // not whitelisted because name doesn't match
-        assert!(res.suspicious == false || res.suspicious == false);
+        assert!(!res.suspicious);
     }
 
     #[test]

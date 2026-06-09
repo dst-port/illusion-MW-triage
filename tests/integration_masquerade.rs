@@ -6,8 +6,7 @@ fn test_masquerade_report_flag() {
     std::env::set_var("ILLUSION_TEST_MODE", "1");
 
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    // use U+0251 in filename to simulate confusable
-    let fname = format!("b\u{0251}sh");
+    let fname = "b\u{0251}sh".to_string();
     let path = tmpdir.path().join(&fname);
     fs::write(&path, "#!/bin/sh\necho OK\n").expect("write");
     let mut perms = fs::metadata(&path).expect("meta").permissions();
@@ -17,7 +16,6 @@ fn test_masquerade_report_flag() {
     let res = illusion_sandbox::run_in_sandbox(path.to_str().unwrap()).expect("run");
     assert!(res.stdout.contains("OK"));
 
-    // find run dir
     let base_name = fname;
     let mut found = None;
     if let Ok(entries) = fs::read_dir("runs") {
@@ -32,7 +30,10 @@ fn test_masquerade_report_flag() {
     assert!(found.is_some());
     let run_dir = found.unwrap();
     let report = fs::read_to_string(run_dir.join("report.json")).expect("report");
-    assert!(report.contains("masquerade:artifact"), "expected masquerade flag in report.json");
+    assert!(
+        report.contains("masquerade:artifact"),
+        "expected masquerade flag in report.json"
+    );
 
     let _ = fs::remove_dir_all(run_dir);
     std::env::remove_var("ILLUSION_TEST_MODE");

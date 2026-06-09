@@ -1,7 +1,7 @@
-use std::path::Path;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use serde::{Serialize, Deserialize};
+use std::path::Path;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -18,25 +18,36 @@ pub struct Whitelist {
 impl Whitelist {
     pub fn load(path: &Path) -> io::Result<Self> {
         let s = fs::read_to_string(path)?;
-        let wl: Whitelist = toml::from_str(&s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let wl: Whitelist =
+            toml::from_str(&s).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(wl)
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let s = toml::to_string(&self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let s =
+            toml::to_string(&self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         fs::write(path, s)
     }
 
     pub fn add_entry(&mut self, name: String, sha256: String) {
-        self.entries.push(Entry { name, sha256, notes: None });
+        self.entries.push(Entry {
+            name,
+            sha256,
+            notes: None,
+        });
     }
 
     pub fn is_whitelisted(&self, name: &str, sha256: &str) -> bool {
-        self.entries.iter().any(|e| e.name == name && e.sha256 == sha256)
+        self.entries
+            .iter()
+            .any(|e| e.name == name && e.sha256 == sha256)
     }
 
     pub fn lookup_by_name(&self, name: &str) -> Option<String> {
-        self.entries.iter().find(|e| e.name == name).map(|e| e.sha256.clone())
+        self.entries
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.sha256.clone())
     }
 }
 

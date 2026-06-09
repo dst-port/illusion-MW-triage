@@ -1,26 +1,21 @@
-use std::path::Path;
 use std::fs::File;
 use std::io::{self, Read};
+use std::path::Path;
 
-/// Check for simple UPX markers in the binary.
 pub fn contains_upx_marker(path: &Path) -> io::Result<bool> {
     let mut f = File::open(path)?;
     let mut buf = Vec::new();
-    // read up to 2MiB for scanning
     let _ = f.by_ref().take(2 * 1024 * 1024).read_to_end(&mut buf)?;
     let s = &buf;
     Ok(s.windows(4).any(|w| w == b"UPX0" || w == b"UPX1")
         || s.windows(3).any(|w| w.eq_ignore_ascii_case(b"UPX")))
 }
 
-/// Scan for a small set of common packer markers (UPX, MPRESS, ASPACK, THEMIDA, etc.)
-/// Returns the matched marker name if found.
 pub fn contains_packer_marker(path: &Path) -> io::Result<Option<String>> {
     let mut f = File::open(path)?;
     let mut buf = Vec::new();
     let _ = f.by_ref().take(2 * 1024 * 1024).read_to_end(&mut buf)?;
     let hay = &buf;
-    // common ASCII markers (strings), case-insensitive where appropriate
     let patterns = [
         "UPX", "UPX0", "UPX1", "MPRESS", "ASPACK", "PEPACK", "THEMIDA", "KPACK", "MEW", "PACK",
     ];
@@ -33,7 +28,6 @@ pub fn contains_packer_marker(path: &Path) -> io::Result<Option<String>> {
     Ok(None)
 }
 
-/// Compute Shannon entropy over the file bytes (sampled up to 4MiB).
 pub fn shannon_entropy(path: &Path) -> io::Result<f64> {
     let mut f = File::open(path)?;
     let mut buf = Vec::new();
@@ -48,7 +42,9 @@ pub fn shannon_entropy(path: &Path) -> io::Result<f64> {
     let len = buf.len() as f64;
     let mut entropy = 0.0f64;
     for &c in &counts {
-        if c == 0 { continue; }
+        if c == 0 {
+            continue;
+        }
         let p = (c as f64) / len;
         entropy -= p * p.log2();
     }
@@ -58,8 +54,8 @@ pub fn shannon_entropy(path: &Path) -> io::Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_entropy_low() {

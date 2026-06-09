@@ -1,23 +1,26 @@
-use std::process::{Command, Stdio};
-use std::io::Read;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::thread;
 use std::env;
 use std::fmt;
-use std::path::PathBuf;
 use std::fs::{self, File};
+use std::io::Read;
 use std::io::Write as IoWrite;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::dumper::{dump_process, compare_memory_vs_disk};
-use crate::monitor::{monitor_process, MonitorOptions};
-use crate::report::{ArtifactInfo, Verdict, Metrics, DropInfo, ProcessInfo, CoreDumpInfo, Evidence, Report};
+use crate::dumper::{compare_memory_vs_disk, dump_process};
 use crate::hash;
-use crate::impersonation::{detect_masquerade};
+use crate::impersonation::detect_masquerade;
+use crate::monitor::{monitor_process, MonitorOptions};
 use crate::packers::{contains_upx_marker, shannon_entropy};
+use crate::report::{
+    ArtifactInfo, CoreDumpInfo, DropInfo, Evidence, Metrics, ProcessInfo, Report, Verdict,
+};
 use std::path::Path;
 
 const KNOWN_GOOD_BASENAMES: &[&str] = &[
-    "bash", "sh", "sshd", "sudo", "systemd", "ls", "cp", "mv", "cat", "python", "python3", "sleep", "cron",
+    "bash", "sh", "sshd", "sudo", "systemd", "ls", "cp", "mv", "cat", "python", "python3", "sleep",
+    "cron",
 ];
 
 #[derive(Debug)]
@@ -67,17 +70,14 @@ impl From<std::string::FromUtf8Error> for SandboxError {
     }
 }
 
-/// Execute `file_path` inside a minimal Firejail sandbox.
-///
-/// - Uses `firejail --net=none --private -- <file_path>`
-/// - Enforces a 30 second timeout and kills the process if exceeded.
-/// - Captures stdout and stderr and returns them in `SandboxResult`.
 pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
     const POLL_INTERVAL_MS: u64 = 20;
-    const MAX_OUTPUT_BYTES: u64 = 64 * 1024; // 64 KiB
+    const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 
-    // Prepare per-run artifacts directory
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     let base_name = std::path::Path::new(file_path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -85,19 +85,20 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
     let out_dir = PathBuf::from(format!("runs/{}-{}", base_name, ts));
     fs::create_dir_all(&out_dir)?;
 
-    let test_mode = env::var("ILLUSION_TEST_MODE").map(|v| {
-        let v = v.to_lowercase();
-        v == "1" || v == "true" || v == "yes"
-    }).unwrap_or(false);
+    let test_mode = env::var("ILLUSION_TEST_MODE")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false);
 
-    // Build the command differently in test-mode (no firejail required).
     let mut cmd = if test_mode {
         let mut c = Command::new(file_path);
         c.stdout(Stdio::piped()).stderr(Stdio::piped());
         c
     } else {
         let mut c = Command::new("firejail");
-        c.args(&["--allow-debug", "--net=none", "--private", "--", file_path])
+        c.args(["--allow-debug", "--net=none", "--private", "--", file_path])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         c
@@ -105,33 +106,34 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(SandboxError::FirejailNotFound),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SandboxError::FirejailNotFound)
+        }
         Err(e) => return Err(SandboxError::Io(e)),
     };
 
-    // start background monitor and dumper while the child runs (skip in test-mode)
     let pid = child.id();
     let monitor_handle = if !test_mode {
-        let pid = pid;
         Some(thread::spawn(move || {
             let opts = MonitorOptions::default();
             monitor_process(pid as i32, Duration::from_secs(30), &opts)
         }))
-    } else { None };
+    } else {
+        None
+    };
 
     let dumper_handle = if !test_mode {
-        let pid = pid;
         let out_dir = out_dir.clone();
         Some(thread::spawn(move || {
-            // brief delay to let the traced process initialize
             thread::sleep(Duration::from_millis(100));
             let dump_res = dump_process(pid, &out_dir);
             let cmp_res = compare_memory_vs_disk(pid);
             (dump_res, cmp_res)
         }))
-    } else { None };
+    } else {
+        None
+    };
 
-    // Prepare output reader threads early to avoid blocking child's writers.
     let mut stdout_buf_rx = None;
     let mut stderr_buf_rx = None;
 
@@ -173,81 +175,143 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                 let out_s = String::from_utf8(out)?;
                 let err_s = String::from_utf8(err)?;
 
-                // persist stdout/stderr to artifacts
-                let _ = File::create(out_dir.join("stdout.txt")).and_then(|mut f| f.write_all(out_s.as_bytes()));
-                let _ = File::create(out_dir.join("stderr.txt")).and_then(|mut f| f.write_all(err_s.as_bytes()));
+                let _ = File::create(out_dir.join("stdout.txt"))
+                    .and_then(|mut f| f.write_all(out_s.as_bytes()));
+                let _ = File::create(out_dir.join("stderr.txt"))
+                    .and_then(|mut f| f.write_all(err_s.as_bytes()));
 
-                // join monitor and dumper results (if started)
-                let monitor_r = if let Some(h) = monitor_handle { h.join().ok().and_then(|r| r.ok()) } else { None };
-                let dumper_r = if let Some(h) = dumper_handle { h.join().ok() } else { None };
+                let monitor_r = if let Some(h) = monitor_handle {
+                    h.join().ok().and_then(|r| r.ok())
+                } else {
+                    None
+                };
+                let dumper_r = if let Some(h) = dumper_handle {
+                    h.join().ok()
+                } else {
+                    None
+                };
 
-                // assemble report
-                let artifact_hash = hash::compute_sha256(std::path::Path::new(file_path)).ok().unwrap_or_default();
-                let artifact = ArtifactInfo { name: base_name.clone(), sha256: artifact_hash };
+                let artifact_hash = hash::compute_sha256(std::path::Path::new(file_path))
+                    .ok()
+                    .unwrap_or_default();
+                let artifact = ArtifactInfo {
+                    name: base_name.clone(),
+                    sha256: artifact_hash,
+                };
 
-                // monitor metrics
-                let (total_pids, transient_count, drops) = if let Some((metrics, trans)) = monitor_r {
-                    (metrics.total_pids_tracked, metrics.transient_drops_detected, trans)
-                } else { (1usize, 0usize, Vec::new()) };
+                let (total_pids, transient_count, drops) = if let Some((metrics, trans)) = monitor_r
+                {
+                    (
+                        metrics.total_pids_tracked,
+                        metrics.transient_drops_detected,
+                        trans,
+                    )
+                } else {
+                    (1usize, 0usize, Vec::new())
+                };
 
-                // dumper results: destructure if present
                 let (core_info, mem_cmp_opt) = if let Some((dump_res, cmp_res)) = dumper_r {
                     let core = match dump_res {
-                        Ok(dm) => Some(CoreDumpInfo { path: dm.path, method: dm.method }),
+                        Ok(dm) => Some(CoreDumpInfo {
+                            path: dm.path,
+                            method: dm.method,
+                        }),
                         Err(_) => None,
                     };
-                    let cmp = match cmp_res {
-                        Ok(c) => Some(c),
-                        Err(_) => None,
-                    };
+                    let cmp = cmp_res.ok();
                     (core, cmp)
-                } else { (None, None) };
+                } else {
+                    (None, None)
+                };
 
-                // basic detections: masquerade on artifact name, packer markers, entropy
                 let verdict_status = if let Some(ref c) = mem_cmp_opt {
-                    if c.mismatch { "suspicious".to_string() } else { "unknown".to_string() }
-                } else { "unknown".to_string() };
-                let mut verdict = Verdict { status: verdict_status.clone(), flags: Vec::new() };
+                    if c.mismatch {
+                        "suspicious".to_string()
+                    } else {
+                        "unknown".to_string()
+                    }
+                } else {
+                    "unknown".to_string()
+                };
+                let mut verdict = Verdict {
+                    status: verdict_status.clone(),
+                    flags: Vec::new(),
+                };
 
-                if let Some((cand, score)) = detect_masquerade(&base_name, KNOWN_GOOD_BASENAMES, 0.9) {
-                    verdict.flags.push(format!("masquerade:artifact:{}:{:.2}", cand, score));
-                    if verdict.status == "unknown" { verdict.status = "suspicious".to_string(); }
+                if let Some((cand, score)) =
+                    detect_masquerade(&base_name, KNOWN_GOOD_BASENAMES, 0.9)
+                {
+                    verdict
+                        .flags
+                        .push(format!("masquerade:artifact:{}:{:.2}", cand, score));
+                    if verdict.status == "unknown" {
+                        verdict.status = "suspicious".to_string();
+                    }
                 }
 
-                match contains_upx_marker(Path::new(file_path)) {
-                    Ok(true) => {
-                        verdict.flags.push("packer:upx".to_string());
-                        if verdict.status == "unknown" { verdict.status = "suspicious".to_string(); }
+                if let Ok(true) = contains_upx_marker(Path::new(file_path)) {
+                    verdict.flags.push("packer:upx".to_string());
+                    if verdict.status == "unknown" {
+                        verdict.status = "suspicious".to_string();
                     }
-                    _ => {}
                 }
 
                 if let Ok(ent) = shannon_entropy(Path::new(file_path)) {
                     if ent > 7.5 {
                         verdict.flags.push(format!("high_entropy:{:.2}", ent));
-                        if verdict.status == "unknown" { verdict.status = "suspicious".to_string(); }
+                        if verdict.status == "unknown" {
+                            verdict.status = "suspicious".to_string();
+                        }
                     }
                 }
 
-                let metrics = Metrics { execution_time_ms: start.elapsed().as_millis(), total_pids_tracked: total_pids, transient_drops_detected: transient_count };
+                let metrics = Metrics {
+                    execution_time_ms: start.elapsed().as_millis(),
+                    total_pids_tracked: total_pids,
+                    transient_drops_detected: transient_count,
+                };
 
-                let drops_info: Vec<DropInfo> = drops.into_iter().map(|p| DropInfo { path: p, sha256: None, matched_whitelist_name: None }).collect();
+                let drops_info: Vec<DropInfo> = drops
+                    .into_iter()
+                    .map(|p| DropInfo {
+                        path: p,
+                        sha256: None,
+                        matched_whitelist_name: None,
+                    })
+                    .collect();
 
-                // process info + per-process masquerade detection
-                let exe_path_buf = mem_cmp_opt.as_ref().and_then(|c| c.exe_path.clone()).unwrap_or_else(|| PathBuf::from(""));
-                let exe_name = exe_path_buf.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "".to_string());
+                let exe_path_buf = mem_cmp_opt
+                    .as_ref()
+                    .and_then(|c| c.exe_path.clone())
+                    .unwrap_or_else(|| PathBuf::from(""));
+                let exe_name = exe_path_buf
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "".to_string());
                 let mut matched_name: Option<String> = None;
                 let mut proc_flagged = mem_cmp_opt.as_ref().map(|c| c.mismatch).unwrap_or(false);
                 if !exe_name.is_empty() {
-                    if let Some((cand, score)) = detect_masquerade(&exe_name, KNOWN_GOOD_BASENAMES, 0.9) {
+                    if let Some((cand, score)) =
+                        detect_masquerade(&exe_name, KNOWN_GOOD_BASENAMES, 0.9)
+                    {
                         matched_name = Some(cand.to_string());
                         proc_flagged = true;
-                        verdict.flags.push(format!("masquerade:process:{}:{:.2}", cand, score));
-                        if verdict.status == "unknown" { verdict.status = "suspicious".to_string(); }
+                        verdict
+                            .flags
+                            .push(format!("masquerade:process:{}:{:.2}", cand, score));
+                        if verdict.status == "unknown" {
+                            verdict.status = "suspicious".to_string();
+                        }
                     }
                 }
 
-                let processes_info: Vec<ProcessInfo> = vec![ProcessInfo { pid, exe_path: exe_path_buf, sha256: mem_cmp_opt.as_ref().and_then(|c| c.in_memory_hash.clone()), matched_whitelist_name: matched_name, flagged: proc_flagged }];
+                let processes_info: Vec<ProcessInfo> = vec![ProcessInfo {
+                    pid,
+                    exe_path: exe_path_buf,
+                    sha256: mem_cmp_opt.as_ref().and_then(|c| c.in_memory_hash.clone()),
+                    matched_whitelist_name: matched_name,
+                    flagged: proc_flagged,
+                }];
 
                 let evidence = Evidence {
                     exit_code: status.code(),
@@ -260,9 +324,15 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                     entry_point: None,
                 };
 
-                let report = Report { artifact, verdict, metrics, evidence };
+                let report = Report {
+                    artifact,
+                    verdict,
+                    metrics,
+                    evidence,
+                };
                 if let Ok(j) = report.to_json() {
-                    let _ = File::create(out_dir.join("report.json")).and_then(|mut f| f.write_all(j.as_bytes()));
+                    let _ = File::create(out_dir.join("report.json"))
+                        .and_then(|mut f| f.write_all(j.as_bytes()));
                 }
 
                 return Ok(SandboxResult {
@@ -275,7 +345,6 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
             None => {
                 if start.elapsed() >= timeout {
                     timed_out = true;
-                    // attempt to kill and collect outputs
                     let _ = child.kill();
                     let status = child.wait()?;
                     let out = stdout_buf_rx
@@ -287,81 +356,144 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                     let out_s = String::from_utf8(out)?;
                     let err_s = String::from_utf8(err)?;
 
-                    // persist stdout/stderr to artifacts
-                    let _ = File::create(out_dir.join("stdout.txt")).and_then(|mut f| f.write_all(out_s.as_bytes()));
-                    let _ = File::create(out_dir.join("stderr.txt")).and_then(|mut f| f.write_all(err_s.as_bytes()));
+                    let _ = File::create(out_dir.join("stdout.txt"))
+                        .and_then(|mut f| f.write_all(out_s.as_bytes()));
+                    let _ = File::create(out_dir.join("stderr.txt"))
+                        .and_then(|mut f| f.write_all(err_s.as_bytes()));
 
-                    // join monitor and dumper results (if started)
-                    let monitor_r = if let Some(h) = monitor_handle { h.join().ok().and_then(|r| r.ok()) } else { None };
-                    let dumper_r = if let Some(h) = dumper_handle { h.join().ok() } else { None };
+                    let monitor_r = if let Some(h) = monitor_handle {
+                        h.join().ok().and_then(|r| r.ok())
+                    } else {
+                        None
+                    };
+                    let dumper_r = if let Some(h) = dumper_handle {
+                        h.join().ok()
+                    } else {
+                        None
+                    };
 
-                    // assemble report
-                    let artifact_hash = hash::compute_sha256(std::path::Path::new(file_path)).ok().unwrap_or_default();
-                    let artifact = ArtifactInfo { name: base_name.clone(), sha256: artifact_hash };
+                    let artifact_hash = hash::compute_sha256(std::path::Path::new(file_path))
+                        .ok()
+                        .unwrap_or_default();
+                    let artifact = ArtifactInfo {
+                        name: base_name.clone(),
+                        sha256: artifact_hash,
+                    };
 
-                    // monitor metrics
-                    let (total_pids, transient_count, drops) = if let Some((metrics, trans)) = monitor_r {
-                        (metrics.total_pids_tracked, metrics.transient_drops_detected, trans)
-                    } else { (1usize, 0usize, Vec::new()) };
+                    let (total_pids, transient_count, drops) =
+                        if let Some((metrics, trans)) = monitor_r {
+                            (
+                                metrics.total_pids_tracked,
+                                metrics.transient_drops_detected,
+                                trans,
+                            )
+                        } else {
+                            (1usize, 0usize, Vec::new())
+                        };
 
-                    // dumper results: destructure if present
                     let (core_info, mem_cmp_opt) = if let Some((dump_res, cmp_res)) = dumper_r {
                         let core = match dump_res {
-                            Ok(dm) => Some(CoreDumpInfo { path: dm.path, method: dm.method }),
+                            Ok(dm) => Some(CoreDumpInfo {
+                                path: dm.path,
+                                method: dm.method,
+                            }),
                             Err(_) => None,
                         };
-                        let cmp = match cmp_res {
-                            Ok(c) => Some(c),
-                            Err(_) => None,
-                        };
+                        let cmp = cmp_res.ok();
                         (core, cmp)
-                    } else { (None, None) };
+                    } else {
+                        (None, None)
+                    };
 
-                    // basic detections: masquerade on artifact name, packer markers, entropy
                     let verdict_status = if let Some(ref c) = mem_cmp_opt {
-                        if c.mismatch { "suspicious".to_string() } else { "unknown".to_string() }
-                    } else { "unknown".to_string() };
-                    let mut verdict = Verdict { status: verdict_status.clone(), flags: Vec::new() };
+                        if c.mismatch {
+                            "suspicious".to_string()
+                        } else {
+                            "unknown".to_string()
+                        }
+                    } else {
+                        "unknown".to_string()
+                    };
+                    let mut verdict = Verdict {
+                        status: verdict_status.clone(),
+                        flags: Vec::new(),
+                    };
 
-                    if let Some((cand, score)) = detect_masquerade(&base_name, KNOWN_GOOD_BASENAMES, 0.9) {
-                        verdict.flags.push(format!("masquerade:artifact:{}:{:.2}", cand, score));
-                        if verdict.status == "unknown" { verdict.status = "suspicious".to_string(); }
+                    if let Some((cand, score)) =
+                        detect_masquerade(&base_name, KNOWN_GOOD_BASENAMES, 0.9)
+                    {
+                        verdict
+                            .flags
+                            .push(format!("masquerade:artifact:{}:{:.2}", cand, score));
+                        if verdict.status == "unknown" {
+                            verdict.status = "suspicious".to_string();
+                        }
                     }
 
-                    match contains_upx_marker(Path::new(file_path)) {
-                        Ok(true) => {
-                            verdict.flags.push("packer:upx".to_string());
-                            if verdict.status == "unknown" { verdict.status = "suspicious".to_string(); }
+                    if let Ok(true) = contains_upx_marker(Path::new(file_path)) {
+                        verdict.flags.push("packer:upx".to_string());
+                        if verdict.status == "unknown" {
+                            verdict.status = "suspicious".to_string();
                         }
-                        _ => {}
                     }
 
                     if let Ok(ent) = shannon_entropy(Path::new(file_path)) {
                         if ent > 7.5 {
                             verdict.flags.push(format!("high_entropy:{:.2}", ent));
-                            if verdict.status == "unknown" { verdict.status = "suspicious".to_string(); }
+                            if verdict.status == "unknown" {
+                                verdict.status = "suspicious".to_string();
+                            }
                         }
                     }
 
-                    let metrics = Metrics { execution_time_ms: start.elapsed().as_millis(), total_pids_tracked: total_pids, transient_drops_detected: transient_count };
+                    let metrics = Metrics {
+                        execution_time_ms: start.elapsed().as_millis(),
+                        total_pids_tracked: total_pids,
+                        transient_drops_detected: transient_count,
+                    };
 
-                    let drops_info: Vec<DropInfo> = drops.into_iter().map(|p| DropInfo { path: p, sha256: None, matched_whitelist_name: None }).collect();
+                    let drops_info: Vec<DropInfo> = drops
+                        .into_iter()
+                        .map(|p| DropInfo {
+                            path: p,
+                            sha256: None,
+                            matched_whitelist_name: None,
+                        })
+                        .collect();
 
-                    // process info + per-process masquerade detection
-                    let exe_path_buf = mem_cmp_opt.as_ref().and_then(|c| c.exe_path.clone()).unwrap_or_else(|| PathBuf::from(""));
-                    let exe_name = exe_path_buf.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "".to_string());
+                    let exe_path_buf = mem_cmp_opt
+                        .as_ref()
+                        .and_then(|c| c.exe_path.clone())
+                        .unwrap_or_else(|| PathBuf::from(""));
+                    let exe_name = exe_path_buf
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "".to_string());
                     let mut matched_name: Option<String> = None;
-                    let mut proc_flagged = mem_cmp_opt.as_ref().map(|c| c.mismatch).unwrap_or(false);
+                    let mut proc_flagged =
+                        mem_cmp_opt.as_ref().map(|c| c.mismatch).unwrap_or(false);
                     if !exe_name.is_empty() {
-                        if let Some((cand, score)) = detect_masquerade(&exe_name, KNOWN_GOOD_BASENAMES, 0.9) {
+                        if let Some((cand, score)) =
+                            detect_masquerade(&exe_name, KNOWN_GOOD_BASENAMES, 0.9)
+                        {
                             matched_name = Some(cand.to_string());
                             proc_flagged = true;
-                            verdict.flags.push(format!("masquerade:process:{}:{:.2}", cand, score));
-                            if verdict.status == "unknown" { verdict.status = "suspicious".to_string(); }
+                            verdict
+                                .flags
+                                .push(format!("masquerade:process:{}:{:.2}", cand, score));
+                            if verdict.status == "unknown" {
+                                verdict.status = "suspicious".to_string();
+                            }
                         }
                     }
 
-                    let processes_info: Vec<ProcessInfo> = vec![ProcessInfo { pid, exe_path: exe_path_buf, sha256: mem_cmp_opt.as_ref().and_then(|c| c.in_memory_hash.clone()), matched_whitelist_name: matched_name, flagged: proc_flagged }];
+                    let processes_info: Vec<ProcessInfo> = vec![ProcessInfo {
+                        pid,
+                        exe_path: exe_path_buf,
+                        sha256: mem_cmp_opt.as_ref().and_then(|c| c.in_memory_hash.clone()),
+                        matched_whitelist_name: matched_name,
+                        flagged: proc_flagged,
+                    }];
 
                     let evidence = Evidence {
                         exit_code: status.code(),
@@ -374,9 +506,15 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                         entry_point: None,
                     };
 
-                    let report = Report { artifact, verdict, metrics, evidence };
+                    let report = Report {
+                        artifact,
+                        verdict,
+                        metrics,
+                        evidence,
+                    };
                     if let Ok(j) = report.to_json() {
-                        let _ = File::create(out_dir.join("report.json")).and_then(|mut f| f.write_all(j.as_bytes()));
+                        let _ = File::create(out_dir.join("report.json"))
+                            .and_then(|mut f| f.write_all(j.as_bytes()));
                     }
 
                     return Ok(SandboxResult {
@@ -391,5 +529,3 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
         }
     }
 }
-
-// Note: older helper removed in favor of reader threads using `Read::take`.

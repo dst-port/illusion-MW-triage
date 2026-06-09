@@ -1,24 +1,27 @@
-use std::path::{Path, PathBuf};
 use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Move `path` into a quarantine directory, return new path.
 pub fn quarantine_file(path: &Path) -> io::Result<PathBuf> {
-    let base = path.file_name().and_then(|s| s.to_str()).unwrap_or("artifact");
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let base = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("artifact");
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     let qdir = PathBuf::from(format!("quarantine/{}-{}", base, ts));
     fs::create_dir_all(&qdir)?;
     let dest = qdir.join(base);
     match fs::rename(path, &dest) {
         Ok(_) => {}
         Err(_) => {
-            // fallback to copy+remove if rename fails
             fs::copy(path, &dest)?;
             fs::remove_file(path)?;
         }
     }
-    // remove execute permission
     let mut perms = fs::metadata(&dest)?.permissions();
     #[cfg(unix)]
     {
@@ -32,8 +35,8 @@ pub fn quarantine_file(path: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_quarantine_move() {

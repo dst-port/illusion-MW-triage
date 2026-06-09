@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
-use std::io;
-use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::detection::analyze_path;
 use crate::quarantine::quarantine_file;
@@ -16,10 +16,17 @@ pub struct HuntFinding {
     pub quarantined: Option<PathBuf>,
 }
 
-/// Recursively scan `paths`, apply detection, optionally quarantine suspicious files.
-pub fn hunt_paths(paths: &[PathBuf], quarantine: bool, whitelist_path: Option<&Path>) -> io::Result<Vec<HuntFinding>> {
+pub fn hunt_paths(
+    paths: &[PathBuf],
+    quarantine: bool,
+    whitelist_path: Option<&Path>,
+) -> io::Result<Vec<HuntFinding>> {
     let mut findings = Vec::new();
-    let whitelist = if let Some(p) = whitelist_path { Whitelist::load(p).ok() } else { None };
+    let whitelist = if let Some(p) = whitelist_path {
+        Whitelist::load(p).ok()
+    } else {
+        None
+    };
     for p in paths {
         if p.is_dir() {
             for entry in walk_dir(p)? {
@@ -28,12 +35,16 @@ pub fn hunt_paths(paths: &[PathBuf], quarantine: bool, whitelist_path: Option<&P
                     if dr.suspicious {
                         let mut quarantined = None;
                         if quarantine {
-                            match quarantine_file(&entry) {
-                                Ok(dest) => quarantined = Some(dest),
-                                Err(_) => {}
+                            if let Ok(dest) = quarantine_file(&entry) {
+                                quarantined = Some(dest);
                             }
                         }
-                        findings.push(HuntFinding { path: entry, flags: dr.flags, sha256: dr.sha256, quarantined });
+                        findings.push(HuntFinding {
+                            path: entry,
+                            flags: dr.flags,
+                            sha256: dr.sha256,
+                            quarantined,
+                        });
                     }
                 }
             }
@@ -42,23 +53,32 @@ pub fn hunt_paths(paths: &[PathBuf], quarantine: bool, whitelist_path: Option<&P
                 if dr.suspicious {
                     let mut quarantined = None;
                     if quarantine {
-                        match quarantine_file(p) {
-                            Ok(dest) => quarantined = Some(dest),
-                            Err(_) => {}
+                        if let Ok(dest) = quarantine_file(p) {
+                            quarantined = Some(dest);
                         }
                     }
-                    findings.push(HuntFinding { path: p.clone(), flags: dr.flags, sha256: dr.sha256, quarantined });
+                    findings.push(HuntFinding {
+                        path: p.clone(),
+                        flags: dr.flags,
+                        sha256: dr.sha256,
+                        quarantined,
+                    });
                 }
             }
         }
     }
 
-    // write report
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     let out_dir = PathBuf::from(format!("hunt_reports/{}", ts));
     fs::create_dir_all(&out_dir)?;
     let report_path = out_dir.join("hunt_report.json");
-    let _ = fs::write(&report_path, serde_json::to_string_pretty(&findings).unwrap());
+    let _ = fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&findings).unwrap(),
+    );
 
     Ok(findings)
 }
@@ -75,14 +95,13 @@ fn walk_dir(dir: &Path) -> io::Result<Vec<PathBuf>> {
         }
     }
     Ok(res)
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use std::io::Write;
+    use tempfile::tempdir;
 
     #[test]
     fn test_hunt_quarantine() {

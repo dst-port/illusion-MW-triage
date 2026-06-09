@@ -1,7 +1,7 @@
-use std::path::Path;
-use std::io::{self, Read};
+use sha2::{Digest, Sha256};
 use std::fs::File;
-use sha2::{Sha256, Digest};
+use std::io::{self, Read};
+use std::path::Path;
 
 pub fn compute_sha256(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
@@ -9,7 +9,9 @@ pub fn compute_sha256(path: &Path) -> io::Result<String> {
     let mut buf = [0u8; 8192];
     loop {
         let n = file.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buf[..n]);
     }
     let result = hasher.finalize();
@@ -24,8 +26,8 @@ pub fn compute_sha256(path: &Path) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_compute_sha256() {
@@ -33,7 +35,9 @@ mod tests {
         write!(f, "hello").expect("write");
         let path = f.path();
         let h = compute_sha256(path).expect("hash");
-        // SHA256("hello")
-        assert_eq!(h, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+        assert_eq!(
+            h,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 }
