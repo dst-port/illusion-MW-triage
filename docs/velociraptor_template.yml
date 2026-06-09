@@ -1,0 +1,28 @@
+Name: FindSameNameDifferentHash
+Description: |
+  Velociraptor artifact that enumerates common system binary names and reports SHA256 mismatches against a provided whitelist.
+Attributes:
+  whitelist: []
+Sources:
+  - type: ProcessListing
+    name: process_listing
+
+  - type: FileFinder
+    paths:
+      - /bin
+      - /usr/bin
+      - /usr/local/bin
+
+Transforms:
+  - name: filter_by_name
+    type: python
+    source: |
+      def transform(records, params):
+        names = params.get('names', ['bash','sshd','sudo','systemd','python','python3'])
+        for r in records:
+          if any(r['Path'].endswith('/' + n) for n in names):
+            yield r
+
+Output:
+  type: CSV
+  path: velociraptor_same_name_hashes.csv

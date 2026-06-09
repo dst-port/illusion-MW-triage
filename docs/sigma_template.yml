@@ -1,0 +1,20 @@
+title: Illusion Sandbox Suspicious Masquerade
+id: 00000000-0000-0000-0000-000000000000
+status: experimental
+description: Detects potential masquerading where filename matches common system utility names but hashes differ from expected.
+author: illusion-sandbox
+date: 2026-06-08
+references:
+  - https://attack.mitre.org/
+logsource:
+  product: linux
+  service: sysmon
+detection:
+  selection:
+    EventID: 1
+    Image|endswith: '\\bash'
+  condition: selection
+falsepositives:
+  - legitimate updates
+level: medium
+*** End Patch

@@ -1,0 +1,32 @@
+[package]
+name = "illusion_sandbox"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+sha2 = "0.10"
+goblin = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.7"
+thiserror = "1.0"
+nix = "0.26"
+strsim = "0.10"
+unicode-normalization = "0.1"
+clap = { version = "4.3", features = ["derive"] }
+log = "0.4"
+env_logger = "0.10"
+yara = { version = "0.8", optional = true }
+
+[dev-dependencies]
+tempfile = "3.3"
+
+[features]
+# disable default features
+default = []
+# Optional runtime yara scanning (requires libyara on the system)
+# Optional YARA integration. Enables optional `yara` dependency.
+# map feature to optional dependency by dep: prefix
+yara = ["dep:yara"]
+# Windows backend (minidump/Win32 specific code)
+windows-backend = []
