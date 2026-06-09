@@ -1,6 +1,7 @@
 Changelog
 0.4.0 - Beta
-Added
+
+Added:
 
 dumper.rs: Windows in-memory SHA‑256 hashing for an executable image (compute_memory_sha256_for_exe) using Toolhelp + ReadProcessMemory.
 sandbox.rs: Job-object based Windows spawner to contain/terminate spawned processes (WindowsSpawner) and tighter cross-platform spawn lifecycle handling.
