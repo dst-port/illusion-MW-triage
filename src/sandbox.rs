@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,10 +13,23 @@ use crate::hash;
 use crate::impersonation::detect_masquerade;
 use crate::monitor::{monitor_process, MonitorOptions};
 use crate::packers::{contains_upx_marker, shannon_entropy};
+use crate::pe;
 use crate::report::{
     ArtifactInfo, CoreDumpInfo, DropInfo, Evidence, Metrics, ProcessInfo, Report, Verdict,
 };
 use std::path::Path;
+
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == ':' || c == '/' || c == ' ' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
 
 const KNOWN_GOOD_BASENAMES: &[&str] = &[
     "bash", "sh", "sshd", "sudo", "systemd", "ls", "cp", "mv", "cat", "python", "python3", "sleep",
@@ -70,6 +83,163 @@ impl From<std::string::FromUtf8Error> for SandboxError {
     }
 }
 
+// Small abstraction for spawning sandboxed processes. This keeps the
+// launcher logic separate so we can add Windows backends (Job/AppContainer)
+// later without changing the rest of the sandbox flow.
+trait SandboxSpawner {
+    fn spawn(&self, file_path: &str) -> std::io::Result<Child>;
+}
+
+struct DirectSpawner;
+impl SandboxSpawner for DirectSpawner {
+    fn spawn(&self, file_path: &str) -> std::io::Result<Child> {
+        let mut c = Command::new(file_path);
+        c.stdout(Stdio::piped()).stderr(Stdio::piped());
+        c.spawn()
+    }
+}
+
+struct FirejailSpawner;
+impl SandboxSpawner for FirejailSpawner {
+    fn spawn(&self, file_path: &str) -> std::io::Result<Child> {
+        let mut c = Command::new("firejail");
+        c.args(["--allow-debug", "--net=none", "--private", "--", file_path])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        c.spawn()
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "windows-backend"))]
+struct WindowsSpawner {
+    job_handle: isize,
+}
+
+#[cfg(all(target_os = "windows", feature = "windows-backend"))]
+impl WindowsSpawner {
+    fn new() -> Self {
+        use std::ptr::null_mut;
+        use std::ffi::c_void;
+
+        // Use minimal raw FFI for CreateJobObjectW so the backend compiles
+        // on cross-targets without depending on `windows-sys` feature gates.
+        unsafe extern "system" {
+            fn CreateJobObjectW(lpJobAttributes: *mut c_void, lpName: *const u16) -> *mut c_void;
+        }
+
+        unsafe {
+            let job = CreateJobObjectW(null_mut(), null_mut()) as isize;
+            if job == 0 {
+                WindowsSpawner { job_handle: 0 }
+            } else {
+                WindowsSpawner { job_handle: job }
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "windows-backend"))]
+impl SandboxSpawner for WindowsSpawner {
+    fn spawn(&self, file_path: &str) -> std::io::Result<Child> {
+        use std::ffi::c_void;
+
+        unsafe extern "system" {
+            fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut c_void;
+            fn AssignProcessToJobObject(hJob: *mut c_void, hProcess: *mut c_void) -> i32;
+            fn CloseHandle(hObject: *mut c_void) -> i32;
+        }
+
+        const PROCESS_ALL_ACCESS: u32 = 0x1F0FFF;
+
+        let mut c = Command::new(file_path);
+        c.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = c.spawn()?;
+        let pid = child.id();
+        unsafe {
+            let hproc = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
+            if !hproc.is_null() && self.job_handle != 0 {
+                let _ = AssignProcessToJobObject(self.job_handle as *mut c_void, hproc);
+                let _ = CloseHandle(hproc);
+            }
+        }
+        Ok(child)
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "windows-backend"))]
+impl Drop for WindowsSpawner {
+    fn drop(&mut self) {
+        use std::ffi::c_void;
+        unsafe extern "system" {
+            fn CloseHandle(hObject: *mut c_void) -> i32;
+        }
+        unsafe {
+            if self.job_handle != 0 {
+                let _ = CloseHandle(self.job_handle as *mut c_void);
+                self.job_handle = 0;
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "windows", not(feature = "windows-backend")))]
+struct WindowsSpawner;
+
+#[cfg(all(target_os = "windows", not(feature = "windows-backend")))]
+impl WindowsSpawner {
+    fn new() -> Self {
+        WindowsSpawner
+    }
+}
+
+#[cfg(all(target_os = "windows", not(feature = "windows-backend")))]
+impl SandboxSpawner for WindowsSpawner {
+    fn spawn(&self, file_path: &str) -> std::io::Result<Child> {
+        let mut c = Command::new(file_path);
+        c.stdout(Stdio::piped()).stderr(Stdio::piped());
+        c.spawn()
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "windows-backend"))]
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_windows_spawner_assigns_job() {
+        let td = tempdir().unwrap();
+        let script = td.path().join("exit0.bat");
+        let mut f = File::create(&script).unwrap();
+        writeln!(f, "exit /b 0").unwrap();
+        f.flush().unwrap();
+
+        let spawner = WindowsSpawner::new();
+        let mut child = spawner.spawn(script.to_str().unwrap()).unwrap();
+        let id = child.id();
+        let _ = child.wait();
+        assert!(id > 0);
+    }
+}
+
+fn platform_spawner() -> Box<dyn SandboxSpawner> {
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(FirejailSpawner)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(WindowsSpawner::new())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Box::new(FirejailSpawner)
+    }
+}
+
 pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
     const POLL_INTERVAL_MS: u64 = 20;
     const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
@@ -92,24 +262,22 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
         })
         .unwrap_or(false);
 
-    let mut cmd = if test_mode {
-        let mut c = Command::new(file_path);
-        c.stdout(Stdio::piped()).stderr(Stdio::piped());
-        c
+    // Spawn the child process via a platform-appropriate spawner.
+    let spawner: Box<dyn SandboxSpawner> = if test_mode {
+        Box::new(DirectSpawner)
     } else {
-        let mut c = Command::new("firejail");
-        c.args(["--allow-debug", "--net=none", "--private", "--", file_path])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        c
+        platform_spawner()
     };
 
-    let mut child = match cmd.spawn() {
+    let mut child = match spawner.spawn(file_path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(SandboxError::FirejailNotFound)
+        Err(e) => {
+            if !test_mode && e.kind() == std::io::ErrorKind::NotFound {
+                return Err(SandboxError::FirejailNotFound);
+            } else {
+                return Err(SandboxError::Io(e));
+            }
         }
-        Err(e) => return Err(SandboxError::Io(e)),
     };
 
     let pid = child.id();
@@ -133,6 +301,26 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
     } else {
         None
     };
+
+    // Optional packet capture (best-effort). If `tcpdump` is available and
+    // permitted, start it to capture to `runs/<name>-<ts>/traffic.pcap`.
+    let mut pcap_child_opt: Option<std::process::Child> = None;
+    if !test_mode {
+        let pcap_path = out_dir.join("traffic.pcap");
+        if let Ok(child) = Command::new("tcpdump")
+            .args([
+                "-i",
+                "any",
+                "-w",
+                pcap_path.to_str().unwrap_or("traffic.pcap"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            pcap_child_opt = Some(child);
+        }
+    }
 
     let mut stdout_buf_rx = None;
     let mut stderr_buf_rx = None;
@@ -199,16 +387,17 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                     sha256: artifact_hash,
                 };
 
-                let (total_pids, transient_count, drops) = if let Some((metrics, trans)) = monitor_r
-                {
-                    (
-                        metrics.total_pids_tracked,
-                        metrics.transient_drops_detected,
-                        trans,
-                    )
-                } else {
-                    (1usize, 0usize, Vec::new())
-                };
+                let (total_pids, transient_count, drops, network_contacts) =
+                    if let Some((metrics, trans, net)) = monitor_r {
+                        (
+                            metrics.total_pids_tracked,
+                            metrics.transient_drops_detected,
+                            trans,
+                            net,
+                        )
+                    } else {
+                        (1usize, 0usize, Vec::new(), Vec::new())
+                    };
 
                 let (core_info, mem_cmp_opt) = if let Some((dump_res, cmp_res)) = dumper_r {
                     let core = match dump_res {
@@ -271,7 +460,7 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                     transient_drops_detected: transient_count,
                 };
 
-                let drops_info: Vec<DropInfo> = drops
+                let mut drops_info: Vec<DropInfo> = drops
                     .into_iter()
                     .map(|p| DropInfo {
                         path: p,
@@ -279,6 +468,78 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                         matched_whitelist_name: None,
                     })
                     .collect();
+
+                // Prepare a mutable copy of network contacts so we can attach per-flow pcaps
+                let mut network_contacts2 = network_contacts.clone();
+
+                // If tcpdump was started, stop it and add the pcap to files_written
+                let pcap_path = out_dir.join("traffic.pcap");
+                if pcap_child_opt.is_some() {
+                    if let Some(mut pc) = pcap_child_opt.take() {
+                        let _ = pc.kill();
+                        let _ = pc.wait();
+                    }
+                }
+                if pcap_path.exists() {
+                    let sha = hash::compute_sha256(&pcap_path).ok();
+                    drops_info.push(DropInfo {
+                        path: pcap_path.clone(),
+                        sha256: sha.clone(),
+                        matched_whitelist_name: None,
+                    });
+
+                    // Try to correlate flows per-network-contact using tcpdump filters
+                    let flows_dir = out_dir.join("flows");
+                    let _ = fs::create_dir_all(&flows_dir);
+                    for nc in network_contacts2.iter_mut() {
+                        let addr = nc.remote_addr.clone();
+                        let port_opt = nc.remote_port;
+                        let safe_addr = sanitize_filename(&addr);
+                        let flow_name = if let Some(p) = port_opt {
+                            format!("flow-{}-{}.pcap", safe_addr, p)
+                        } else {
+                            format!("flow-{}.pcap", safe_addr)
+                        };
+                        let flow_path = flows_dir.join(flow_name);
+                        // Build tcpdump filter expression
+                        let mut cmd = Command::new("tcpdump");
+                        cmd.args([
+                            "-nn",
+                            "-r",
+                            pcap_path.to_str().unwrap_or("traffic.pcap"),
+                            "-w",
+                            flow_path.to_str().unwrap_or(""),
+                        ]);
+                        if let Some(p) = port_opt {
+                            cmd.args(["host", &addr, "and", "port", &p.to_string()]);
+                        } else {
+                            cmd.args(["host", &addr]);
+                        }
+                        if let Ok(st) = cmd.status() {
+                            if st.success() && flow_path.exists() {
+                                let fsha = hash::compute_sha256(&flow_path).ok();
+                                drops_info.push(DropInfo {
+                                    path: flow_path.clone(),
+                                    sha256: fsha.clone(),
+                                    matched_whitelist_name: None,
+                                });
+                                nc.pcap_path = Some(flow_path);
+                                nc.pcap_sha = fsha;
+                            }
+                        }
+                    }
+                }
+
+                // Optional YARA scanning (prefers crate when enabled, falls back to CLI)
+                let mut yara_matches_vec: Vec<String> = Vec::new();
+                if let Ok(rules_path) = env::var("YARA_RULES_PATH") {
+                    if !rules_path.is_empty() && Path::new(&rules_path).exists() {
+                        yara_matches_vec = crate::yara_wrapper::run_yara_matches(
+                            Path::new(&rules_path),
+                            Path::new(file_path),
+                        );
+                    }
+                }
 
                 let exe_path_buf = mem_cmp_opt
                     .as_ref()
@@ -318,10 +579,32 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                     timed_out,
                     stdout_snip: out_s.chars().take(4096).collect(),
                     stderr_snip: err_s.chars().take(4096).collect(),
-                    drops: drops_info,
+                    drops: drops_info.clone(),
+                    files_written: drops_info.clone(),
                     processes: processes_info,
+                    network: network_contacts2.clone(),
                     core_dump: core_info,
-                    entry_point: None,
+                    entry_point: {
+                        let p = Path::new(file_path);
+                        if let Ok(Some(ei)) = crate::elf::extract_entry_snippet(p, 64) {
+                            Some(crate::report::EntryPointInfo {
+                                addr: ei.addr,
+                                offset: ei.offset,
+                                packed: ei.packed,
+                                bytes: ei.bytes.iter().map(|b| format!("{:02x}", b)).collect(),
+                            })
+                        } else if let Ok(Some(ei)) = pe::extract_entry_snippet(p, 64) {
+                            Some(crate::report::EntryPointInfo {
+                                addr: ei.addr,
+                                offset: ei.offset,
+                                packed: ei.packed,
+                                bytes: ei.bytes.iter().map(|b| format!("{:02x}", b)).collect(),
+                            })
+                        } else {
+                            None
+                        }
+                    },
+                    yara_matches: yara_matches_vec.clone(),
                 };
 
                 let report = Report {
@@ -380,15 +663,16 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                         sha256: artifact_hash,
                     };
 
-                    let (total_pids, transient_count, drops) =
-                        if let Some((metrics, trans)) = monitor_r {
+                    let (total_pids, transient_count, drops, network_contacts) =
+                        if let Some((metrics, trans, net)) = monitor_r {
                             (
                                 metrics.total_pids_tracked,
                                 metrics.transient_drops_detected,
                                 trans,
+                                net,
                             )
                         } else {
-                            (1usize, 0usize, Vec::new())
+                            (1usize, 0usize, Vec::new(), Vec::new())
                         };
 
                     let (core_info, mem_cmp_opt) = if let Some((dump_res, cmp_res)) = dumper_r {
@@ -452,7 +736,7 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                         transient_drops_detected: transient_count,
                     };
 
-                    let drops_info: Vec<DropInfo> = drops
+                    let mut drops_info: Vec<DropInfo> = drops
                         .into_iter()
                         .map(|p| DropInfo {
                             path: p,
@@ -460,6 +744,77 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                             matched_whitelist_name: None,
                         })
                         .collect();
+
+                    // Prepare a mutable copy of network contacts so we can attach per-flow pcaps
+                    let mut network_contacts2 = network_contacts.clone();
+
+                    // If tcpdump was started, stop it and add the pcap to files_written
+                    let pcap_path = out_dir.join("traffic.pcap");
+                    if pcap_child_opt.is_some() {
+                        if let Some(mut pc) = pcap_child_opt.take() {
+                            let _ = pc.kill();
+                            let _ = pc.wait();
+                        }
+                    }
+                    if pcap_path.exists() {
+                        let sha = hash::compute_sha256(&pcap_path).ok();
+                        drops_info.push(DropInfo {
+                            path: pcap_path.clone(),
+                            sha256: sha.clone(),
+                            matched_whitelist_name: None,
+                        });
+
+                        // Try to correlate flows per-network-contact using tcpdump filters
+                        let flows_dir = out_dir.join("flows");
+                        let _ = fs::create_dir_all(&flows_dir);
+                        for nc in network_contacts2.iter_mut() {
+                            let addr = nc.remote_addr.clone();
+                            let port_opt = nc.remote_port;
+                            let safe_addr = sanitize_filename(&addr);
+                            let flow_name = if let Some(p) = port_opt {
+                                format!("flow-{}-{}.pcap", safe_addr, p)
+                            } else {
+                                format!("flow-{}.pcap", safe_addr)
+                            };
+                            let flow_path = flows_dir.join(flow_name);
+                            let mut cmd = Command::new("tcpdump");
+                            cmd.args([
+                                "-nn",
+                                "-r",
+                                pcap_path.to_str().unwrap_or("traffic.pcap"),
+                                "-w",
+                                flow_path.to_str().unwrap_or(""),
+                            ]);
+                            if let Some(p) = port_opt {
+                                cmd.args(["host", &addr, "and", "port", &p.to_string()]);
+                            } else {
+                                cmd.args(["host", &addr]);
+                            }
+                            if let Ok(st) = cmd.status() {
+                                if st.success() && flow_path.exists() {
+                                    let fsha = hash::compute_sha256(&flow_path).ok();
+                                    drops_info.push(DropInfo {
+                                        path: flow_path.clone(),
+                                        sha256: fsha.clone(),
+                                        matched_whitelist_name: None,
+                                    });
+                                    nc.pcap_path = Some(flow_path);
+                                    nc.pcap_sha = fsha;
+                                }
+                            }
+                        }
+                    }
+
+                    // Optional YARA scanning (prefers crate when enabled, falls back to CLI)
+                    let mut yara_matches_vec: Vec<String> = Vec::new();
+                    if let Ok(rules_path) = env::var("YARA_RULES_PATH") {
+                        if !rules_path.is_empty() && Path::new(&rules_path).exists() {
+                            yara_matches_vec = crate::yara_wrapper::run_yara_matches(
+                                Path::new(&rules_path),
+                                Path::new(file_path),
+                            );
+                        }
+                    }
 
                     let exe_path_buf = mem_cmp_opt
                         .as_ref()
@@ -500,10 +855,32 @@ pub fn run_in_sandbox(file_path: &str) -> Result<SandboxResult, SandboxError> {
                         timed_out,
                         stdout_snip: out_s.chars().take(4096).collect(),
                         stderr_snip: err_s.chars().take(4096).collect(),
-                        drops: drops_info,
+                        drops: drops_info.clone(),
+                        files_written: drops_info.clone(),
                         processes: processes_info,
+                        network: network_contacts2.clone(),
                         core_dump: core_info,
-                        entry_point: None,
+                        entry_point: {
+                            let p = Path::new(file_path);
+                            if let Ok(Some(ei)) = crate::elf::extract_entry_snippet(p, 64) {
+                                Some(crate::report::EntryPointInfo {
+                                    addr: ei.addr,
+                                    offset: ei.offset,
+                                    packed: ei.packed,
+                                    bytes: ei.bytes.iter().map(|b| format!("{:02x}", b)).collect(),
+                                })
+                            } else if let Ok(Some(ei)) = pe::extract_entry_snippet(p, 64) {
+                                Some(crate::report::EntryPointInfo {
+                                    addr: ei.addr,
+                                    offset: ei.offset,
+                                    packed: ei.packed,
+                                    bytes: ei.bytes.iter().map(|b| format!("{:02x}", b)).collect(),
+                                })
+                            } else {
+                                None
+                            }
+                        },
+                        yara_matches: yara_matches_vec.clone(),
                     };
 
                     let report = Report {

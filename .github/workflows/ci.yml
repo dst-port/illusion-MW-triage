@@ -5,6 +5,52 @@ on:
   pull_request:
 
 jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: |
+          rustup component add rustfmt || true
+          cargo fmt --all -- --check
+
+      - name: Lint (clippy)
+        run: |
+          rustup component add clippy || true
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+
+      - name: Build release
+        run: cargo build --workspace --release
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:

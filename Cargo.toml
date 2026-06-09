@@ -17,16 +17,17 @@ clap = { version = "4.3", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
 yara = { version = "0.8", optional = true }
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_ProcessStatus", "Win32_System_Memory"] }
 
 [dev-dependencies]
 tempfile = "3.3"
 
 [features]
-# disable default features
+
 default = []
-# Optional runtime yara scanning (requires libyara on the system)
-# Optional YARA integration. Enables optional `yara` dependency.
-# map feature to optional dependency by dep: prefix
+
+
+
 yara = ["dep:yara"]
-# Windows backend (minidump/Win32 specific code)
-windows-backend = []
+
+windows-backend = ["dep:windows-sys"]

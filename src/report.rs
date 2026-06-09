@@ -20,7 +20,7 @@ pub struct Metrics {
     pub transient_drops_detected: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct DropInfo {
     pub path: PathBuf,
     pub sha256: Option<String>,
@@ -47,6 +47,18 @@ pub struct EntryPointInfo {
     pub addr: u64,
     pub offset: u64,
     pub packed: Option<String>,
+    pub bytes: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct NetworkContact {
+    pub protocol: String,
+    pub remote_addr: String,
+    pub remote_port: Option<u16>,
+    pub hostname: Option<String>,
+    pub timestamp_ms: Option<u128>,
+    pub pcap_path: Option<PathBuf>,
+    pub pcap_sha: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -64,9 +76,12 @@ pub struct Evidence {
     pub stdout_snip: String,
     pub stderr_snip: String,
     pub drops: Vec<DropInfo>,
+    pub files_written: Vec<DropInfo>,
     pub processes: Vec<ProcessInfo>,
+    pub network: Vec<NetworkContact>,
     pub core_dump: Option<CoreDumpInfo>,
     pub entry_point: Option<EntryPointInfo>,
+    pub yara_matches: Vec<String>,
 }
 
 impl Report {

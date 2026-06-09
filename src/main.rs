@@ -21,6 +21,12 @@ enum Commands {
         target: PathBuf,
         #[arg(long)]
         test_mode: bool,
+        #[arg(long)]
+        yara_rules: Option<PathBuf>,
+        #[arg(long)]
+        pcap: bool,
+        #[arg(long, default_value_t = String::from("pretty"))]
+        output: String,
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
@@ -30,6 +36,10 @@ enum Commands {
         poll_secs: u64,
         #[arg(long)]
         test_mode: bool,
+        #[arg(long)]
+        yara_rules: Option<PathBuf>,
+        #[arg(long)]
+        pcap: bool,
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
@@ -65,11 +75,32 @@ fn find_latest_run_dir(base_name: &str, since_ts: u128) -> Option<PathBuf> {
     None
 }
 
-fn analyze(target: &Path, _out: &Option<PathBuf>, test_mode: bool) -> Result<(), i32> {
+fn analyze(
+    target: &Path,
+    _out: &Option<PathBuf>,
+    test_mode: bool,
+    yara_rules: &Option<PathBuf>,
+    pcap: bool,
+    _output: &str,
+) -> Result<(), i32> {
     if test_mode {
         env::set_var("ILLUSION_TEST_MODE", "1");
     } else {
         env::remove_var("ILLUSION_TEST_MODE");
+    }
+
+    if let Some(r) = yara_rules {
+        if let Some(s) = r.to_str() {
+            env::set_var("YARA_RULES_PATH", s);
+        }
+    } else {
+        env::remove_var("YARA_RULES_PATH");
+    }
+
+    if pcap {
+        env::set_var("ILLUSION_ENABLE_PCAP", "1");
+    } else {
+        env::remove_var("ILLUSION_ENABLE_PCAP");
     }
 
     let base_name = target
@@ -133,7 +164,13 @@ fn watch(dir: &Path, poll_secs: u64, test_mode: bool, _out: &Option<PathBuf>) ->
                         }
                     }
                     println!("Processing {}", path.display());
-                    let res = analyze(&path, _out, test_mode);
+                    // propagate yara/pcap settings from env into analyze() via current env
+                    let yara_rules = env::var("YARA_RULES_PATH").ok().map(PathBuf::from);
+                    let pcap = env::var("ILLUSION_ENABLE_PCAP")
+                        .ok()
+                        .map(|v| v == "1")
+                        .unwrap_or(false);
+                    let res = analyze(&path, _out, test_mode, &yara_rules, pcap, "pretty");
                     match res {
                         Ok(_) => {
                             let dest = processed.join(path.file_name().unwrap());
@@ -161,8 +198,11 @@ fn main() {
             target,
             out,
             test_mode,
+            yara_rules,
+            pcap,
+            output,
         } => {
-            if let Err(code) = analyze(target, out, *test_mode) {
+            if let Err(code) = analyze(target, out, *test_mode, yara_rules, *pcap, output) {
                 exit(code);
             }
         }
@@ -170,6 +210,8 @@ fn main() {
             dir,
             poll_secs,
             test_mode,
+            yara_rules: _,
+            pcap: _,
             out,
         } => {
             if let Err(code) = watch(dir, *poll_secs, *test_mode, out) {

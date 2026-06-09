@@ -412,6 +412,7 @@ dependencies = [
  "thiserror",
  "toml",
  "unicode-normalization",
+ "windows-sys",
  "yara",
 ]
 
