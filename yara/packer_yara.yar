@@ -262,4 +262,3 @@ rule Generic_Malware_Heuristic
         and
         5 of them
 }
-```
