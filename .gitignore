@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target/
+**/target/
+# Editor dirs
+.vscode/
+.idea/
+# Swap and temp files
+*.swp
+*.tmp
+# Logs
+*.log
+# keep release/ in repo (do not ignore)
