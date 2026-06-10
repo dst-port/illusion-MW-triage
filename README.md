@@ -1,4 +1,4 @@
-# Illusion Sandbox
+# Illusion triage
 
 Lightweight malware triage sandbox. Run artifacts in an isolated process and collect dynamic and static evidence (drops, network contacts, memory/core dumps).
 
